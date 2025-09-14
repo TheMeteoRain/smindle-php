@@ -1,0 +1,225 @@
+version: '3.8'
+
+networks:
+  smindle:
+
+volumes:
+  grafana-storage: {}
+  prometheus-storage: {}
+  laravel-logs: {}
+  orders-process-logs: {}
+  orders-result-logs: {}
+  python-logs: {}
+
+services:
+  web:
+    image: smindle-php:latest
+    build:
+      target: web
+      context: .
+      dockerfile: Dockerfile.php
+    env_file:
+      - .env
+    environment:
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: laravel
+      DB_USERNAME: laravel
+      DB_PASSWORD: donut_care
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      CACHE_STORE: redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8001:80"
+    volumes:
+      #- .:/var/www/html # local dev
+      - laravel-logs:/var/www/html/storage/logs
+    depends_on:
+      - db
+    networks:
+      - smindle
+
+  queue-orders-process:
+    image: smindle-php:latest
+    build:
+      target: web
+      context: .
+      dockerfile: Dockerfile.php
+    command: php artisan queue:work --verbose
+    env_file:
+      - .env
+    environment:
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: laravel
+      DB_USERNAME: laravel
+      DB_PASSWORD: donut_care
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      RABBITMQ_HOST: rabbitmq
+    volumes:
+      #- .:/var/www/html # local dev
+      - orders-process-logs:/var/www/html/storage/logs
+    depends_on:
+      - db
+      - rabbitmq
+    networks:
+      - smindle
+    restart: unless-stopped
+
+  queue-orders-result:
+    image: smindle-php:latest
+    build:
+      target: web
+      context: .
+      dockerfile: Dockerfile.php
+    command: php artisan orders:process-results --verbose
+    env_file:
+      - .env
+    environment:
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: laravel
+      DB_USERNAME: laravel
+      DB_PASSWORD: donut_care
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      RABBITMQ_HOST: rabbitmq
+    volumes:
+      #- .:/var/www/html # local dev
+      - orders-result-logs:/var/www/html/storage/logs
+    depends_on:
+      - db
+      - rabbitmq
+    networks:
+      - smindle
+    restart: unless-stopped
+
+  queue-python-worker:
+    build:
+        context: .
+        dockerfile: Dockerfile.python
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: user
+      RABBITMQ_PASS: pass
+    volumes:
+      - ./python:/app
+      - python-logs:/app/logs
+    depends_on:
+      - rabbitmq
+    networks:
+      - smindle
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    ports:
+      - "12345:12345"   # Alloy HTTP port
+      - "9091:9091"     # Prometheus metrics
+    volumes:
+      - ./docker/alloy/config.alloy:/etc/alloy/config.alloy
+      - laravel-logs:/var/www/html/storage/logs
+      - python-logs:/app/logs
+      - orders-process-logs:/var/logs/process
+      - orders-result-logs:/var/logs/result
+    networks:
+      - smindle
+
+  loki:
+    image: grafana/loki:3.4.1
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./docker/loki/loki-config.yaml:/etc/loki/local-config.yaml
+    networks:
+      - smindle
+
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "3200:3200" # tempo
+      - "4317:4317" # otlp grpc
+      - "4318:4318" # otlp http
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo.yaml
+    networks:
+      - smindle
+
+  redis:
+    image: redis:8-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server
+    networks:
+      - smindle
+
+  db:
+    image: postgres:17.6-alpine
+    restart: always
+    # set shared memory limit when using docker compose
+    shm_size: 128mb
+    environment:
+      POSTGRES_USER: laravel
+      POSTGRES_DB: laravel
+      POSTGRES_PASSWORD: donut_care
+    ports:
+      - "2345:5432"
+    networks:
+      - smindle
+    healthcheck:
+        test: ["CMD-SHELL", "pg_isready"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+    # volumes:
+    #   - dbdata:/var/lib/mysql
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    restart: always
+    ports:
+      - "5672:5672" # AMQP
+      - "15672:15672"  # UI
+      - "15692:15692" # Prometheus
+    environment:
+        RABBITMQ_DEFAULT_USER: user
+        RABBITMQ_DEFAULT_PASS: pass
+    command: >
+      bash -c "rabbitmq-plugins enable --offline rabbitmq_prometheus && rabbitmq-server"
+    networks:
+      - smindle
+
+  grafana:
+    image: grafana/grafana-enterprise
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./docker/grafana:/var/lib/grafana
+    networks:
+      - smindle
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./docker/prometheus:/etc/prometheus
+      - prometheus-storage:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - smindle

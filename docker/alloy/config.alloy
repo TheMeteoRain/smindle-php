@@ -1,0 +1,80 @@
+local.file_match "example" {
+  path_targets = [
+    {
+        __address__ = "web",
+        __path__    = "/var/www/html/storage/logs/laravel.log",
+        instance    = "localhost",
+        job         = "php",
+        service     = "php",
+    },
+    {
+        __address__ = "queue-orders-result",
+        __path__    = "/var/logs/result/laravel.log",
+        instance    = "localhost",
+        job         = "php",
+        service     = "queue-orders-result",
+    },
+    {
+        __address__ = "queue-orders-process",
+        __path__    = "/var/logs/process/laravel.log",
+        instance    = "localhost",
+        job         = "php",
+        service     = "queue-orders-process",
+    },
+    {
+        __address__ = "queue-python-worker",
+        __path__    = "/app/logs/app.log",
+        instance    = "localhost",
+        job         = "python",
+        service     = "queue-python-worker",
+    },
+  ]
+}
+
+loki.source.file "example" {
+  targets    = local.file_match.example.targets
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+  external_labels = {}
+}
+
+
+
+
+otelcol.receiver.otlp "default" {
+    grpc {
+        endpoint = "0.0.0.0:4317"
+    }
+    http {
+        endpoint = "0.0.0.0:4318"
+    }
+
+    output {
+        metrics = [otelcol.processor.memory_limiter.default.input]
+        logs    = [otelcol.processor.memory_limiter.default.input]
+        traces  = [otelcol.processor.memory_limiter.default.input]
+    }
+}
+
+otelcol.processor.memory_limiter "default" {
+    check_interval   = "1s"
+    limit_percentage = 90
+    spike_limit_percentage = 20
+
+    output {
+        metrics = [otelcol.exporter.otlp.default.input]
+        logs    = [otelcol.exporter.otlp.default.input]
+        traces  = [otelcol.exporter.otlp.default.input]
+    }
+}
+
+otelcol.exporter.otlp "default" {
+    client {
+        endpoint = "tempo:4317"
+    }
+}
